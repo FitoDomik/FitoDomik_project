@@ -24,6 +24,33 @@ import base64
 import sys
 import urllib3
 urllib3.disable_warnings()
+import logging
+from logging.handlers import RotatingFileHandler
+def setup_logging():
+    try:
+        log_directory = os.path.dirname(os.path.abspath(__file__))
+        log_path = os.path.join(log_directory, 'fitodomik.log')
+        logger = logging.getLogger('fitodomik')
+        if logger.handlers:
+            return logger
+        logger.setLevel(logging.INFO)
+        formatter = logging.Formatter(
+            '%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s'
+        )
+        file_handler = RotatingFileHandler(
+            log_path, maxBytes=1_000_000, backupCount=5, encoding='utf-8'
+        )
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        logging.captureWarnings(True)
+        return logger
+    except Exception:
+        logging.basicConfig(level=logging.INFO)
+        return logging.getLogger('fitodomik')
+logger = setup_logging()
 def setup_ssl_and_network():
     cert_paths = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "cert_temp", "mozilla_certs.pem"),
@@ -479,21 +506,29 @@ class ArduinoHandler:
         self.curtains_state = 0
         self.pump_state = 0
         self.fan_state = 0
+        self.last_sensor_data_time = None
     def connect(self):
         if self.is_connected:
             return True
         try:
+            logger.info(f"Arduino: подключение к порту {self.port}")
             self.serial_connection = serial.Serial(self.port, 9600, timeout=3)
             time_module.sleep(2)
             self.is_connected = True
+            logger.info("Arduino: соединение установлено")
             return True
         except Exception as e:
             self.is_connected = False
+            logger.exception(f"Arduino: ошибка подключения к {self.port}")
             return False
     def disconnect(self):
         if self.serial_connection and self.is_connected:
-            self.serial_connection.close()
+            try:
+                self.serial_connection.close()
+            except Exception:
+                logger.exception("Arduino: ошибка закрытия соединения")
             self.is_connected = False
+            logger.info("Arduino: соединение закрыто")
     def start_monitoring(self):
         if not self.is_connected:
             if not self.connect():
@@ -502,12 +537,17 @@ class ArduinoHandler:
             return True
         self.running = True
         self.monitoring_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
+        logger.info("Arduino: старт мониторинга датчиков")
         self.monitoring_thread.start()
         return True
     def stop_monitoring(self):
+        logger.info("Arduino: остановка мониторинга датчиков")
         self.running = False
         if self.monitoring_thread:
-            self.monitoring_thread.join(timeout=2)
+            try:
+                self.monitoring_thread.join(timeout=2)
+            except Exception:
+                logger.exception("Arduino: ошибка при остановке потока мониторинга")
         self.disconnect()
     def _monitoring_loop(self):
         while self.running:
@@ -519,6 +559,7 @@ class ArduinoHandler:
                             continue
                 time_module.sleep(0.1)
             except Exception as e:
+                logger.exception("Arduino: исключение в цикле мониторинга")
                 time_module.sleep(2)
     def parse_sensor_response(self, response):
         try:
@@ -546,6 +587,7 @@ class ArduinoHandler:
                 self.pump_state = self.relay2_state
                 self.curtains_state = self.relay3_state
                 self.led_state = self.relay4_state
+                self.last_sensor_data_time = datetime.now()
                 if self.update_callback:
                     self.update_callback()
                 return True
@@ -553,6 +595,7 @@ class ArduinoHandler:
                 return self.parse_relay_status(response)
             return False
         except Exception as e:
+            logger.exception("Arduino: ошибка парсинга ответа датчиков")
             return False
     def parse_relay_status(self, response):
         try:
@@ -574,10 +617,12 @@ class ArduinoHandler:
                     elif relay_num == "R4":
                         self.relay4_state = 1 if relay_state else 0
                         self.led_state = self.relay4_state
+            self.last_sensor_data_time = datetime.now()
             if self.update_callback:
                 self.update_callback()
             return True
         except Exception as e:
+            logger.exception("Arduino: ошибка парсинга статуса реле")
             return False
     def send_command(self, device_type, state):
         if not self.is_connected:
@@ -600,6 +645,7 @@ class ArduinoHandler:
             elif device_type == "STATUS":
                 command = "S"
             if command:
+                logger.info(f"Arduino: отправка команды '{device_type}' -> '{command}'")
                 self.serial_connection.reset_input_buffer()
                 self.serial_connection.write((command + '\n').encode('utf-8'))
                 time_module.sleep(0.5)
@@ -611,12 +657,14 @@ class ArduinoHandler:
             return False
         except Exception as e:
             self.is_connected = False
+            logger.exception("Arduino: ошибка при отправке команды")
             return False
     def send_schedule_data(self, data):
         if not self.is_connected:
             if not self.connect():
                 return False
         try:
+            logger.info("Arduino: отправка расписания/порогов в устройство")
             self.serial_connection.reset_input_buffer()
             self.serial_connection.write((data + '\n').encode('utf-8'))
             time_module.sleep(2)
@@ -628,10 +676,14 @@ class ArduinoHandler:
                     if line:
                         response_lines.append(line)
                         if "Data loaded successfully" in line:
+                            logger.info("Arduino: загрузка данных подтверждена")
                             return True
                 time_module.sleep(0.1)
+            if response_lines:
+                logger.warning(f"Arduino: подтверждение не получено, ответы: {response_lines}")
             return len(response_lines) > 0
         except Exception as e:
+            logger.exception("Arduino: ошибка отправки расписания/порогов")
             return False
     def request_sensor_data(self):
         return True
@@ -648,16 +700,23 @@ class DataSender:
         self.sending_queue = []
         self.queue_lock = threading.Lock()
         self.sending_active = False
+        self.last_successful_send_time = None
+        self.last_attempt_send_time = None
+        self.max_queue_size = 500
         self.start_sender_thread()
     def start_sender_thread(self):
         if self.sending_thread is None or not self.sending_thread.is_alive():
             self.sending_active = True
             self.sending_thread = threading.Thread(target=self._sender_thread_loop, daemon=True)
+            logger.info("DataSender: старт фонового потока отправки")
             self.sending_thread.start()
     def stop_sender_thread(self):
         self.sending_active = False
         if self.sending_thread and self.sending_thread.is_alive():
-            self.sending_thread.join(timeout=1.0)
+            try:
+                self.sending_thread.join(timeout=1.0)
+            except Exception:
+                logger.exception("DataSender: ошибка остановки потока")
     def _sender_thread_loop(self):
         while self.sending_active:
             data_to_send = None
@@ -672,7 +731,12 @@ class DataSender:
         self.headers = {"X-Auth-Token": f"{self.token}"}
     def get_max_sensor_id(self):
         try:
-            response = requests.get(self.max_id_url, headers=self.headers)
+            response = requests.get(
+                self.max_id_url,
+                headers=self.headers,
+                timeout=10,
+                verify=os.environ.get('REQUESTS_CA_BUNDLE', True)
+            )
             if response.status_code == 200:
                 data = response.json()
                 if data.get('success') and 'max_id' in data:
@@ -684,6 +748,7 @@ class DataSender:
             else:
                 return self.last_used_id
         except Exception as e:
+            logger.warning("DataSender: ошибка получения max_id, используем локальный last_used_id")
             return self.last_used_id
     def send_data(self, temp, humidity, soil, light, co2, pressure, 
                   led_state, curtains_state, pump_state, fan_state):
@@ -702,14 +767,20 @@ class DataSender:
             except (ValueError, TypeError):
                 return False
             with self.queue_lock:
+                if len(self.sending_queue) >= self.max_queue_size:
+                    dropped = len(self.sending_queue) - self.max_queue_size + 1
+                    del self.sending_queue[:dropped]
+                    logger.warning(f"DataSender: очередь переполнена, отброшено {dropped} старых записей")
                 self.sending_queue.append((temp, humidity, soil, light, co2, pressure, 
                                           led_state, curtains_state, pump_state, fan_state))
             return True
         except Exception:
+            logger.exception("DataSender: ошибка помещения данных в очередь")
             return False
     def _send_data_internal(self, temp, humidity, soil, light, co2, pressure, 
                            led_state, curtains_state, pump_state, fan_state):
         try:
+            self.last_attempt_send_time = datetime.now()
             max_id = self.get_max_sensor_id()
             next_id = max(max_id + 1, self.last_used_id + 1)
             try:
@@ -746,16 +817,23 @@ class DataSender:
                         resp_data = response.json()
                         if resp_data.get('success'):
                             self.last_used_id = next_id
+                            self.last_successful_send_time = datetime.now()
+                            logger.info(f"DataSender: отправлено успешно id={next_id}")
                             return True
                         else:
+                            logger.warning(f"DataSender: ответ 200 без success: {resp_data}")
                             return False
                     except:
+                        logger.warning("DataSender: не удалось распарсить JSON ответа")
                         return False
                 else:
+                    logger.warning(f"DataSender: HTTP {response.status_code}")
                     return False
-            except:
+            except Exception as ex:
+                logger.warning(f"DataSender: исключение при отправке: {ex}")
                 return False
-        except:
+        except Exception:
+            logger.exception("DataSender: общая ошибка _send_data_internal")
             return False
 class ThresholdManager:
     def __init__(self, token=""):
@@ -1003,6 +1081,10 @@ class FitoDomikApp:
         self.check_photo_time()
         self.root.after(2000, self.auto_start_system)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.last_successful_send_time = None
+        self.last_health_check = datetime.now()
+        self.restart_cooldown_until = datetime.min
+        self.root.after(15_000, self.check_health)
     def update_control_mode(self):
         mode = self.control_mode.get()
         self.save_settings()
@@ -1046,9 +1128,9 @@ class FitoDomikApp:
         try:
             base_url = 'https://fitodomik.online/api'
             headers = {'X-Auth-Token': token} if token else {}
-            t = requests.get(f"{base_url}/get-thresholds.php", headers=headers, timeout=10).json()
-            d = requests.get(f"{base_url}/get-sensor-data.php", headers=headers, timeout=10).json()
-            s = requests.get(f"{base_url}/get-schedule.php", headers=headers, timeout=10).json()
+            t = requests.get(f"{base_url}/get-thresholds.php", headers=headers, timeout=10, verify=os.environ.get('REQUESTS_CA_BUNDLE', True)).json()
+            d = requests.get(f"{base_url}/get-sensor-data.php", headers=headers, timeout=10, verify=os.environ.get('REQUESTS_CA_BUNDLE', True)).json()
+            s = requests.get(f"{base_url}/get-schedule.php", headers=headers, timeout=10, verify=os.environ.get('REQUESTS_CA_BUNDLE', True)).json()
             order = ['temperature', 'humidity_air', 'humidity_soil', 'co2']
             thresholds = ";".join(f"{t[k]['min_limit']}-{t[k]['max_limit']}" 
                                  for k in order if k in t) or "0-0;0-0;0-0;0-0"
@@ -1074,7 +1156,7 @@ class FitoDomikApp:
                 return ",".join(result)
             schedule = f"{group(lamp_hours)};{group(curtain_hours)}"
             return f"{thresholds}|{devices}|{schedule}"
-        except:
+        except Exception:
             return "0-0;0-0;0-0;0-0|0,0|0;0"
     def load_manual_data_to_arduino(self):
         try:
@@ -1216,6 +1298,7 @@ class FitoDomikApp:
         if hasattr(self.data_sender, 'stop_sender_thread'):
             self.data_sender.stop_sender_thread()
         self.root.destroy()
+        logger.info("Приложение закрыто пользователем")
     def apply_theme(self):
         if hasattr(self, '_theme_applying'):
             return
@@ -1349,6 +1432,7 @@ class FitoDomikApp:
             return
         self.arduino.port = self.port
         self.arduino.polling_interval = self.polling_interval
+        logger.info("UI: запуск системы мониторинга")
         success = self.arduino.start_monitoring()
         if success:
             self.start_button.config(text="Система запущена", state=tk.DISABLED)
@@ -1357,8 +1441,10 @@ class FitoDomikApp:
             if self.control_mode.get() == "auto":
                 self.root.after(2000, self.start_auto_mode)
         else:
+            logger.error(f"UI: не удалось подключиться к порту {self.arduino.port}")
             messagebox.showerror("Ошибка", f"Не удалось подключиться к порту {self.arduino.port}")
     def stop_system(self):
+        logger.info("UI: остановка системы мониторинга пользователем")
         self.arduino.stop_monitoring()
         self.start_button.config(text="Запустить систему", state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
@@ -1366,6 +1452,7 @@ class FitoDomikApp:
         if not self.arduino.running:
             self.arduino.port = self.port
             self.arduino.polling_interval = self.polling_interval
+            logger.info("UI: авто‑запуск системы мониторинга при старте приложения")
             success = self.arduino.start_monitoring()
             if success:
                 self.start_button.config(text="Система запущена", state=tk.DISABLED)
@@ -1465,6 +1552,10 @@ class FitoDomikApp:
                             self.arduino.fan_state
                         )
                         self.last_send_time = current_time
+                        if success:
+                            logger.info("Пакет данных помещен в очередь на отправку")
+                        else:
+                            logger.warning("Не удалось поставить данные в очередь отправки")
                         if not success:
                             self.last_send_time = current_time - timedelta(seconds=(self.data_send_interval - 60))
                     except:
@@ -1474,6 +1565,46 @@ class FitoDomikApp:
         finally:
             if hasattr(self, '_update_pending'):
                 del self._update_pending
+    def check_health(self):
+        try:
+            now = datetime.now()
+            if getattr(self.data_sender, 'last_successful_send_time', None):
+                self.last_successful_send_time = self.data_sender.last_successful_send_time
+            send_stalled = False
+            if self.last_successful_send_time is not None:
+                if (now - self.last_successful_send_time).total_seconds() > 120:
+                    send_stalled = True
+            arduino_stalled = False
+            last_sensor_time = getattr(self.arduino, 'last_sensor_data_time', None)
+            if last_sensor_time is not None:
+                if (now - last_sensor_time).total_seconds() > (self.polling_interval * 3 + 5):
+                    arduino_stalled = True
+            if (send_stalled or arduino_stalled) and now >= self.restart_cooldown_until:
+                reason = ("send stalled" if send_stalled else "") + (" & " if send_stalled and arduino_stalled else "") + ("arduino stalled" if arduino_stalled else "")
+                logger.warning(f"Watchdog: перезапуск мониторинга, причина: {reason}")
+                self.safe_restart_monitoring()
+                self.restart_cooldown_until = now + timedelta(minutes=3)
+        except Exception:
+            logger.exception("Watchdog: ошибка в check_health")
+        finally:
+            self.root.after(15_000, self.check_health)
+    def safe_restart_monitoring(self):
+        try:
+            logger.info("Watchdog: остановка мониторинга для перезапуска")
+            if self.arduino.running:
+                self.arduino.stop_monitoring()
+            time_module.sleep(0.5)
+            self.arduino.port = self.port
+            self.arduino.polling_interval = self.polling_interval
+            started = self.arduino.start_monitoring()
+            if started:
+                logger.info("Watchdog: мониторинг запущен повторно")
+                self.root.after(500, self.load_data_to_arduino)
+                self.root.after(1000, self.arduino.request_device_states)
+            else:
+                logger.error("Watchdog: не удалось запустить мониторинг после перезапуска")
+        except Exception:
+            logger.exception("Watchdog: ошибка safe_restart_monitoring")
     def init_weather_tab(self):
         frame = ttk.Frame(self.tab_weather)
         frame.pack(fill='both', expand=True, padx=20, pady=20)
@@ -1945,7 +2076,7 @@ class FitoDomikApp:
                 self.load_auto_data_to_arduino()
         except Exception as e:
             error_msg = f"Ошибка при получении данных: {str(e)}"
-            print(error_msg)
+            logger.error(error_msg)
             self.root.after(0, lambda: self.threshold_status_var.set(error_msg))
     def _update_schedule_ui(self, schedule_data):
         if not schedule_data:
@@ -2141,7 +2272,6 @@ class FitoDomikApp:
                 self.root.overrideredirect(True)
         except Exception as e:
             print(f"Ошибка переключения полноэкранного режима: {e}")
-    
     def close_app(self):
         self.on_close()
     def toggle_second_photo_time(self, *args):
@@ -2630,7 +2760,7 @@ class FitoDomikApp:
                 self.load_auto_data_to_arduino()
         except Exception as e:
             error_msg = f"Ошибка при получении данных: {str(e)}"
-            print(error_msg)
+            logger.error(error_msg)
             self.root.after(0, lambda: self.threshold_status_var.set(error_msg))
     def create_manual_threshold_inputs(self):
         header_frame = ttk.Frame(self.thresholds_container)
