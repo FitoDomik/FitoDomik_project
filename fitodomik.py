@@ -507,6 +507,8 @@ class ArduinoHandler:
         self.pump_state = 0
         self.fan_state = 0
         self.last_sensor_data_time = None
+        self.serial_lock = threading.RLock()
+        self.serial_transaction_active = threading.Event()
     def connect(self):
         if self.is_connected:
             return True
@@ -552,8 +554,16 @@ class ArduinoHandler:
     def _monitoring_loop(self):
         while self.running:
             try:
-                if self.is_connected and self.serial_connection.in_waiting > 0:
-                    line = self.serial_connection.readline().decode('utf-8', errors='replace').strip()
+                if self.serial_transaction_active.is_set():
+                    time_module.sleep(0.05)
+                    continue
+                if self.is_connected and self.serial_connection and self.serial_connection.in_waiting > 0:
+                    with self.serial_lock:
+                        try:
+                            line = self.serial_connection.readline().decode('utf-8', errors='replace').strip()
+                        except (OSError, TypeError, AttributeError):
+                            self.is_connected = False
+                            continue
                     if line:
                         if self.parse_sensor_response(line):
                             continue
@@ -629,62 +639,73 @@ class ArduinoHandler:
             if not self.connect():
                 return False
         try:
-            command = ""
-            if device_type == "LED" or device_type == "LAMP":
-                command = "4"  
-            elif device_type == "CURTAINS":
-                command = "3"  
-            elif device_type == "RELAY3" or device_type == "PUMP":
-                command = "2"  
-            elif device_type == "RELAY4" or device_type == "FAN":
-                command = "1"  
-            elif device_type == "ALL_ON":
-                command = "A+"
-            elif device_type == "ALL_OFF":
-                command = "A-"
-            elif device_type == "STATUS":
-                command = "S"
-            if command:
-                logger.info(f"Arduino: отправка команды '{device_type}' -> '{command}'")
-                self.serial_connection.reset_input_buffer()
-                self.serial_connection.write((command + '\n').encode('utf-8'))
-                time_module.sleep(0.5)
-                if self.serial_connection.in_waiting > 0:
-                    response = self.serial_connection.readline().decode('utf-8', errors='replace').strip()
-                    if response:
-                        self.parse_relay_status(response)
-                return True
-            return False
+            # Блокируем мониторинг на время транзакции
+            self.serial_transaction_active.set()
+            time_module.sleep(0.05)
+            with self.serial_lock:
+                command = ""
+                if device_type == "LED" or device_type == "LAMP":
+                    command = "4"  
+                elif device_type == "CURTAINS":
+                    command = "3"  
+                elif device_type == "RELAY3" or device_type == "PUMP":
+                    command = "2"  
+                elif device_type == "RELAY4" or device_type == "FAN":
+                    command = "1"  
+                elif device_type == "ALL_ON":
+                    command = "A+"
+                elif device_type == "ALL_OFF":
+                    command = "A-"
+                elif device_type == "STATUS":
+                    command = "S"
+                if command:
+                    logger.info(f"Arduino: отправка команды '{device_type}' -> '{command}'")
+                    self.serial_connection.reset_input_buffer()
+                    self.serial_connection.write((command + '\n').encode('utf-8'))
+                    time_module.sleep(0.5)
+                    if self.serial_connection.in_waiting > 0:
+                        response = self.serial_connection.readline().decode('utf-8', errors='replace').strip()
+                        if response:
+                            self.parse_relay_status(response)
+                    return True
+                return False
         except Exception as e:
             self.is_connected = False
             logger.exception("Arduino: ошибка при отправке команды")
             return False
+        finally:
+            self.serial_transaction_active.clear()
     def send_schedule_data(self, data):
         if not self.is_connected:
             if not self.connect():
                 return False
         try:
             logger.info("Arduino: отправка расписания/порогов в устройство")
-            self.serial_connection.reset_input_buffer()
-            self.serial_connection.write((data + '\n').encode('utf-8'))
-            time_module.sleep(2)
-            response_lines = []
-            timeout_start = time_module.time()
-            while time_module.time() - timeout_start < 5:  
-                if self.serial_connection.in_waiting > 0:
-                    line = self.serial_connection.readline().decode('utf-8', errors='replace').strip()
-                    if line:
-                        response_lines.append(line)
-                        if "Data loaded successfully" in line:
-                            logger.info("Arduino: загрузка данных подтверждена")
-                            return True
-                time_module.sleep(0.1)
-            if response_lines:
-                logger.warning(f"Arduino: подтверждение не получено, ответы: {response_lines}")
-            return len(response_lines) > 0
+            self.serial_transaction_active.set()
+            time_module.sleep(0.05)
+            with self.serial_lock:
+                self.serial_connection.reset_input_buffer()
+                self.serial_connection.write((data + '\n').encode('utf-8'))
+                time_module.sleep(2)
+                response_lines = []
+                timeout_start = time_module.time()
+                while time_module.time() - timeout_start < 5:  
+                    if self.serial_connection.in_waiting > 0:
+                        line = self.serial_connection.readline().decode('utf-8', errors='replace').strip()
+                        if line:
+                            response_lines.append(line)
+                            if "Data loaded successfully" in line:
+                                logger.info("Arduino: загрузка данных подтверждена")
+                                return True
+                    time_module.sleep(0.1)
+                if response_lines:
+                    logger.warning(f"Arduino: подтверждение не получено, ответы: {response_lines}")
+                return len(response_lines) > 0
         except Exception as e:
             logger.exception("Arduino: ошибка отправки расписания/порогов")
             return False
+        finally:
+            self.serial_transaction_active.clear()
     def request_sensor_data(self):
         return True
     def request_device_states(self):
@@ -1101,7 +1122,11 @@ class FitoDomikApp:
         else:
             self.load_manual_data_to_arduino()
     def load_auto_data_to_arduino(self):
-        threading.Thread(target=self._load_auto_data_thread, daemon=True).start()
+        if getattr(self, '_load_auto_thread', None) and self._load_auto_thread.is_alive():
+            logger.info("UI: пропуск запуска загрузки авто-данных — предыдущий поток ещё работает")
+            return
+        self._load_auto_thread = threading.Thread(target=self._load_auto_data_thread, daemon=True)
+        self._load_auto_thread.start()
     def _load_auto_data_thread(self):
         try:
             if not self.token:
@@ -1572,8 +1597,15 @@ class FitoDomikApp:
                 self.last_successful_send_time = self.data_sender.last_successful_send_time
             send_stalled = False
             if self.last_successful_send_time is not None:
-                if (now - self.last_successful_send_time).total_seconds() > 120:
+                try:
+                    threshold_seconds = max(600, int(self.data_send_interval * 2.0))
+                    logger.debug(f"Watchdog: data_send_interval={self.data_send_interval}s, threshold={threshold_seconds}s")
+                except Exception:
+                    threshold_seconds = 600
+                    logger.warning("Watchdog: ошибка расчёта порога, используем 600 сек")
+                if (now - self.last_successful_send_time).total_seconds() > threshold_seconds:
                     send_stalled = True
+                    logger.warning(f"Watchdog: send stalled - последняя отправка была {(now - self.last_successful_send_time).total_seconds():.0f} сек назад")
             arduino_stalled = False
             last_sensor_time = getattr(self.arduino, 'last_sensor_data_time', None)
             if last_sensor_time is not None:
