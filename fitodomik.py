@@ -24,33 +24,6 @@ import base64
 import sys
 import urllib3
 urllib3.disable_warnings()
-import logging
-from logging.handlers import RotatingFileHandler
-def setup_logging():
-    try:
-        log_directory = os.path.dirname(os.path.abspath(__file__))
-        log_path = os.path.join(log_directory, 'fitodomik.log')
-        logger = logging.getLogger('fitodomik')
-        if logger.handlers:
-            return logger
-        logger.setLevel(logging.INFO)
-        formatter = logging.Formatter(
-            '%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s'
-        )
-        file_handler = RotatingFileHandler(
-            log_path, maxBytes=1_000_000, backupCount=5, encoding='utf-8'
-        )
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
-        logging.captureWarnings(True)
-        return logger
-    except Exception:
-        logging.basicConfig(level=logging.INFO)
-        return logging.getLogger('fitodomik')
-logger = setup_logging()
 def setup_ssl_and_network():
     cert_paths = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "cert_temp", "mozilla_certs.pem"),
@@ -488,7 +461,7 @@ class ArduinoHandler:
     def __init__(self):
         self.port = None
         self.serial_connection = None
-        self.polling_interval = 5
+        self.polling_interval = 5 * 60
         self.is_connected = False
         self.running = False
         self.monitoring_thread = None
@@ -513,24 +486,20 @@ class ArduinoHandler:
         if self.is_connected:
             return True
         try:
-            logger.info(f"Arduino: подключение к порту {self.port}")
             self.serial_connection = serial.Serial(self.port, 9600, timeout=3)
             time_module.sleep(2)
             self.is_connected = True
-            logger.info("Arduino: соединение установлено")
             return True
         except Exception as e:
             self.is_connected = False
-            logger.exception(f"Arduino: ошибка подключения к {self.port}")
             return False
     def disconnect(self):
         if self.serial_connection and self.is_connected:
             try:
                 self.serial_connection.close()
             except Exception:
-                logger.exception("Arduino: ошибка закрытия соединения")
+                pass
             self.is_connected = False
-            logger.info("Arduino: соединение закрыто")
     def start_monitoring(self):
         if not self.is_connected:
             if not self.connect():
@@ -539,17 +508,15 @@ class ArduinoHandler:
             return True
         self.running = True
         self.monitoring_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
-        logger.info("Arduino: старт мониторинга датчиков")
         self.monitoring_thread.start()
         return True
     def stop_monitoring(self):
-        logger.info("Arduino: остановка мониторинга датчиков")
         self.running = False
         if self.monitoring_thread:
             try:
                 self.monitoring_thread.join(timeout=2)
             except Exception:
-                logger.exception("Arduino: ошибка при остановке потока мониторинга")
+                pass
         self.disconnect()
     def _monitoring_loop(self):
         while self.running:
@@ -569,7 +536,6 @@ class ArduinoHandler:
                             continue
                 time_module.sleep(0.1)
             except Exception as e:
-                logger.exception("Arduino: исключение в цикле мониторинга")
                 time_module.sleep(2)
     def parse_sensor_response(self, response):
         try:
@@ -605,7 +571,6 @@ class ArduinoHandler:
                 return self.parse_relay_status(response)
             return False
         except Exception as e:
-            logger.exception("Arduino: ошибка парсинга ответа датчиков")
             return False
     def parse_relay_status(self, response):
         try:
@@ -632,14 +597,12 @@ class ArduinoHandler:
                 self.update_callback()
             return True
         except Exception as e:
-            logger.exception("Arduino: ошибка парсинга статуса реле")
             return False
     def send_command(self, device_type, state):
         if not self.is_connected:
             if not self.connect():
                 return False
         try:
-            # Блокируем мониторинг на время транзакции
             self.serial_transaction_active.set()
             time_module.sleep(0.05)
             with self.serial_lock:
@@ -659,7 +622,8 @@ class ArduinoHandler:
                 elif device_type == "STATUS":
                     command = "S"
                 if command:
-                    logger.info(f"Arduino: отправка команды '{device_type}' -> '{command}'")
+                    if not self.serial_connection or not self.serial_connection.is_open:
+                        return False
                     self.serial_connection.reset_input_buffer()
                     self.serial_connection.write((command + '\n').encode('utf-8'))
                     time_module.sleep(0.5)
@@ -671,7 +635,6 @@ class ArduinoHandler:
                 return False
         except Exception as e:
             self.is_connected = False
-            logger.exception("Arduino: ошибка при отправке команды")
             return False
         finally:
             self.serial_transaction_active.clear()
@@ -680,10 +643,12 @@ class ArduinoHandler:
             if not self.connect():
                 return False
         try:
-            logger.info("Arduino: отправка расписания/порогов в устройство")
             self.serial_transaction_active.set()
             time_module.sleep(0.05)
             with self.serial_lock:
+                # Проверяем, что порт все еще открыт
+                if not self.serial_connection or not self.serial_connection.is_open:
+                    return False
                 self.serial_connection.reset_input_buffer()
                 self.serial_connection.write((data + '\n').encode('utf-8'))
                 time_module.sleep(2)
@@ -695,14 +660,10 @@ class ArduinoHandler:
                         if line:
                             response_lines.append(line)
                             if "Data loaded successfully" in line:
-                                logger.info("Arduino: загрузка данных подтверждена")
                                 return True
                     time_module.sleep(0.1)
-                if response_lines:
-                    logger.warning(f"Arduino: подтверждение не получено, ответы: {response_lines}")
                 return len(response_lines) > 0
         except Exception as e:
-            logger.exception("Arduino: ошибка отправки расписания/порогов")
             return False
         finally:
             self.serial_transaction_active.clear()
@@ -729,7 +690,6 @@ class DataSender:
         if self.sending_thread is None or not self.sending_thread.is_alive():
             self.sending_active = True
             self.sending_thread = threading.Thread(target=self._sender_thread_loop, daemon=True)
-            logger.info("DataSender: старт фонового потока отправки")
             self.sending_thread.start()
     def stop_sender_thread(self):
         self.sending_active = False
@@ -737,7 +697,7 @@ class DataSender:
             try:
                 self.sending_thread.join(timeout=1.0)
             except Exception:
-                logger.exception("DataSender: ошибка остановки потока")
+                pass
     def _sender_thread_loop(self):
         while self.sending_active:
             data_to_send = None
@@ -769,7 +729,6 @@ class DataSender:
             else:
                 return self.last_used_id
         except Exception as e:
-            logger.warning("DataSender: ошибка получения max_id, используем локальный last_used_id")
             return self.last_used_id
     def send_data(self, temp, humidity, soil, light, co2, pressure, 
                   led_state, curtains_state, pump_state, fan_state):
@@ -791,12 +750,10 @@ class DataSender:
                 if len(self.sending_queue) >= self.max_queue_size:
                     dropped = len(self.sending_queue) - self.max_queue_size + 1
                     del self.sending_queue[:dropped]
-                    logger.warning(f"DataSender: очередь переполнена, отброшено {dropped} старых записей")
                 self.sending_queue.append((temp, humidity, soil, light, co2, pressure, 
                                           led_state, curtains_state, pump_state, fan_state))
             return True
         except Exception:
-            logger.exception("DataSender: ошибка помещения данных в очередь")
             return False
     def _send_data_internal(self, temp, humidity, soil, light, co2, pressure, 
                            led_state, curtains_state, pump_state, fan_state):
@@ -839,22 +796,16 @@ class DataSender:
                         if resp_data.get('success'):
                             self.last_used_id = next_id
                             self.last_successful_send_time = datetime.now()
-                            logger.info(f"DataSender: отправлено успешно id={next_id}")
                             return True
                         else:
-                            logger.warning(f"DataSender: ответ 200 без success: {resp_data}")
                             return False
                     except:
-                        logger.warning("DataSender: не удалось распарсить JSON ответа")
                         return False
                 else:
-                    logger.warning(f"DataSender: HTTP {response.status_code}")
                     return False
             except Exception as ex:
-                logger.warning(f"DataSender: исключение при отправке: {ex}")
                 return False
         except Exception:
-            logger.exception("DataSender: общая ошибка _send_data_internal")
             return False
 class ThresholdManager:
     def __init__(self, token=""):
@@ -1016,7 +967,7 @@ class FitoDomikApp:
         self.sensor_history = SensorHistory()
         self.last_update_time = datetime.now()
         self.chart_update_interval = 30  
-        self.data_send_interval = 1800   
+        self.data_send_interval = 30 * 60
         self.last_send_time = datetime.now() - timedelta(seconds=self.data_send_interval)  
         self.next_photo_check_time = datetime.now()
         self.photo_check_interval = 60  
@@ -1057,7 +1008,7 @@ class FitoDomikApp:
         self.current_theme = "light"
         self.token = ""
         self.port = "COM10"
-        self.polling_interval = 5
+        self.polling_interval = 5 * 60
         self.photo_time = 12
         self.photo_count = 1
         self.photo_time2 = 18  
@@ -1123,7 +1074,6 @@ class FitoDomikApp:
             self.load_manual_data_to_arduino()
     def load_auto_data_to_arduino(self):
         if getattr(self, '_load_auto_thread', None) and self._load_auto_thread.is_alive():
-            logger.info("UI: пропуск запуска загрузки авто-данных — предыдущий поток ещё работает")
             return
         self._load_auto_thread = threading.Thread(target=self._load_auto_data_thread, daemon=True)
         self._load_auto_thread.start()
@@ -1267,10 +1217,22 @@ class FitoDomikApp:
                     self.current_theme = settings.get('theme', 'light')
                     self.token = settings.get('token', '')
                     self.port = settings.get('port', 'COM10')
-                    self.polling_interval = settings.get('polling_interval', 5)
+                    polling_setting = settings.get('polling_interval', 5)
+                    if polling_setting < 100:
+                        self.polling_interval = polling_setting * 60
+                    else:
+                        self.polling_interval = polling_setting
+                    
                     if 'data_send_interval' in settings:
-                        self.data_send_interval = settings.get('data_send_interval')
-                    if self.data_send_interval < 300:  
+                        send_setting = settings.get('data_send_interval')
+                        if send_setting < 1000:
+                            self.data_send_interval = send_setting * 60
+                        else:
+                            self.data_send_interval = send_setting
+                    else:
+                        self.data_send_interval = 30 * 60
+                    
+                    if self.data_send_interval < 300:
                         self.data_send_interval = 300
                     self.photo_time = settings.get('photo_time', 12)
                     self.plant_analyzer.camera_index = settings.get('camera_index', 0)
@@ -1323,7 +1285,6 @@ class FitoDomikApp:
         if hasattr(self.data_sender, 'stop_sender_thread'):
             self.data_sender.stop_sender_thread()
         self.root.destroy()
-        logger.info("Приложение закрыто пользователем")
     def apply_theme(self):
         if hasattr(self, '_theme_applying'):
             return
@@ -1457,7 +1418,6 @@ class FitoDomikApp:
             return
         self.arduino.port = self.port
         self.arduino.polling_interval = self.polling_interval
-        logger.info("UI: запуск системы мониторинга")
         success = self.arduino.start_monitoring()
         if success:
             self.start_button.config(text="Система запущена", state=tk.DISABLED)
@@ -1466,10 +1426,8 @@ class FitoDomikApp:
             if self.control_mode.get() == "auto":
                 self.root.after(2000, self.start_auto_mode)
         else:
-            logger.error(f"UI: не удалось подключиться к порту {self.arduino.port}")
             messagebox.showerror("Ошибка", f"Не удалось подключиться к порту {self.arduino.port}")
     def stop_system(self):
-        logger.info("UI: остановка системы мониторинга пользователем")
         self.arduino.stop_monitoring()
         self.start_button.config(text="Запустить систему", state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
@@ -1477,7 +1435,6 @@ class FitoDomikApp:
         if not self.arduino.running:
             self.arduino.port = self.port
             self.arduino.polling_interval = self.polling_interval
-            logger.info("UI: авто‑запуск системы мониторинга при старте приложения")
             success = self.arduino.start_monitoring()
             if success:
                 self.start_button.config(text="Система запущена", state=tk.DISABLED)
@@ -1577,10 +1534,6 @@ class FitoDomikApp:
                             self.arduino.fan_state
                         )
                         self.last_send_time = current_time
-                        if success:
-                            logger.info("Пакет данных помещен в очередь на отправку")
-                        else:
-                            logger.warning("Не удалось поставить данные в очередь отправки")
                         if not success:
                             self.last_send_time = current_time - timedelta(seconds=(self.data_send_interval - 60))
                     except:
@@ -1599,30 +1552,25 @@ class FitoDomikApp:
             if self.last_successful_send_time is not None:
                 try:
                     threshold_seconds = max(600, int(self.data_send_interval * 2.0))
-                    logger.debug(f"Watchdog: data_send_interval={self.data_send_interval}s, threshold={threshold_seconds}s")
                 except Exception:
                     threshold_seconds = 600
-                    logger.warning("Watchdog: ошибка расчёта порога, используем 600 сек")
                 if (now - self.last_successful_send_time).total_seconds() > threshold_seconds:
                     send_stalled = True
-                    logger.warning(f"Watchdog: send stalled - последняя отправка была {(now - self.last_successful_send_time).total_seconds():.0f} сек назад")
             arduino_stalled = False
             last_sensor_time = getattr(self.arduino, 'last_sensor_data_time', None)
             if last_sensor_time is not None:
-                if (now - last_sensor_time).total_seconds() > (self.polling_interval * 3 + 5):
+                arduino_threshold = max(600, self.polling_interval * 2)
+                if (now - last_sensor_time).total_seconds() > arduino_threshold:
                     arduino_stalled = True
             if (send_stalled or arduino_stalled) and now >= self.restart_cooldown_until:
-                reason = ("send stalled" if send_stalled else "") + (" & " if send_stalled and arduino_stalled else "") + ("arduino stalled" if arduino_stalled else "")
-                logger.warning(f"Watchdog: перезапуск мониторинга, причина: {reason}")
                 self.safe_restart_monitoring()
                 self.restart_cooldown_until = now + timedelta(minutes=3)
         except Exception:
-            logger.exception("Watchdog: ошибка в check_health")
+            pass
         finally:
             self.root.after(15_000, self.check_health)
     def safe_restart_monitoring(self):
         try:
-            logger.info("Watchdog: остановка мониторинга для перезапуска")
             if self.arduino.running:
                 self.arduino.stop_monitoring()
             time_module.sleep(0.5)
@@ -1630,13 +1578,10 @@ class FitoDomikApp:
             self.arduino.polling_interval = self.polling_interval
             started = self.arduino.start_monitoring()
             if started:
-                logger.info("Watchdog: мониторинг запущен повторно")
                 self.root.after(500, self.load_data_to_arduino)
                 self.root.after(1000, self.arduino.request_device_states)
-            else:
-                logger.error("Watchdog: не удалось запустить мониторинг после перезапуска")
         except Exception:
-            logger.exception("Watchdog: ошибка safe_restart_monitoring")
+            pass
     def init_weather_tab(self):
         frame = ttk.Frame(self.tab_weather)
         frame.pack(fill='both', expand=True, padx=20, pady=20)
@@ -2108,7 +2053,6 @@ class FitoDomikApp:
                 self.load_auto_data_to_arduino()
         except Exception as e:
             error_msg = f"Ошибка при получении данных: {str(e)}"
-            logger.error(error_msg)
             self.root.after(0, lambda: self.threshold_status_var.set(error_msg))
     def _update_schedule_ui(self, schedule_data):
         if not schedule_data:
@@ -2207,23 +2151,23 @@ class FitoDomikApp:
         polling_label.pack(side='left', padx=5)  
         self.interval_spinbox = ttk.Spinbox(polling_frame, from_=1, to=60, width=3)  
         self.interval_spinbox.pack(side='left', padx=5)  
-        self.interval_spinbox.set(self.polling_interval)
+        self.interval_spinbox.set(self.polling_interval // 60)
         self.interval_spinbox.bind("<FocusOut>", lambda e: self.auto_save_settings())
         self.interval_spinbox.bind("<<Increment>>", lambda e: self.auto_save_settings())
         self.interval_spinbox.bind("<<Decrement>>", lambda e: self.auto_save_settings())
-        interval_units = tk.Label(polling_frame, text="секунд", font=("Arial", 12))
+        interval_units = tk.Label(polling_frame, text="минут", font=("Arial", 12))
         interval_units.pack(side='left')
         send_interval_frame = ttk.Frame(intervals_frame)
         send_interval_frame.pack(fill='x', padx=10, pady=5)
         send_interval_label = tk.Label(send_interval_frame, text="Отправка данных:", font=("Arial", 12))
         send_interval_label.pack(side='left', padx=5)
-        self.send_interval_spinbox = ttk.Spinbox(send_interval_frame, from_=300, to=7200, width=4)  
+        self.send_interval_spinbox = ttk.Spinbox(send_interval_frame, from_=5, to=120, width=4)  
         self.send_interval_spinbox.pack(side='left', padx=5)
-        self.send_interval_spinbox.set(self.data_send_interval)
+        self.send_interval_spinbox.set(self.data_send_interval // 60)
         self.send_interval_spinbox.bind("<FocusOut>", lambda e: self.auto_save_settings())
         self.send_interval_spinbox.bind("<<Increment>>", lambda e: self.auto_save_settings())
         self.send_interval_spinbox.bind("<<Decrement>>", lambda e: self.auto_save_settings())
-        send_interval_units = tk.Label(send_interval_frame, text="секунд", font=("Arial", 12))
+        send_interval_units = tk.Label(send_interval_frame, text="минут", font=("Arial", 12))
         send_interval_units.pack(side='left')
         photo_count_frame = ttk.Frame(intervals_frame)
         photo_count_frame.pack(fill='x', padx=10, pady=5)  
@@ -2326,15 +2270,17 @@ class FitoDomikApp:
         self.token = self.token_entry.get()
         self.port = self.port_combobox.get()
         try:
-            self.polling_interval = int(self.interval_spinbox.get())
+            polling_minutes = int(self.interval_spinbox.get())
+            self.polling_interval = polling_minutes * 60
         except ValueError:
-            self.polling_interval = 5  
+            self.polling_interval = 5 * 60
         try:
-            self.data_send_interval = int(self.send_interval_spinbox.get())
-            if self.data_send_interval < 300:  
+            send_minutes = int(self.send_interval_spinbox.get())
+            self.data_send_interval = send_minutes * 60
+            if self.data_send_interval < 300:
                 self.data_send_interval = 300
         except ValueError:
-            self.data_send_interval = 300
+            self.data_send_interval = 30 * 60
         try:
             self.photo_time = int(self.photo_time_spinbox.get())
             if self.photo_time < 1 or self.photo_time > 24:
@@ -2792,7 +2738,6 @@ class FitoDomikApp:
                 self.load_auto_data_to_arduino()
         except Exception as e:
             error_msg = f"Ошибка при получении данных: {str(e)}"
-            logger.error(error_msg)
             self.root.after(0, lambda: self.threshold_status_var.set(error_msg))
     def create_manual_threshold_inputs(self):
         header_frame = ttk.Frame(self.thresholds_container)
