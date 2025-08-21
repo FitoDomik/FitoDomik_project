@@ -28,10 +28,11 @@
 ```
 ФитоДомик/
 │
-├── fitodomik.py       # Основной файл приложения
-├── settings.json      # Файл с настройками приложения
-├── README.md          # Документация проекта
-├── fitodomik.exe      # Приложение exe
+├── fitodomik.py         # Основной файл приложения
+├── settings.json        # Файл с настройками приложения
+├── README.md            # Документация проекта
+├── fitodomik.exe        # Приложение exe
+├──fitodomik&logging.py  # Программа с системой логирования
 │
 ├── temp_humidity_light_2/       # Папка с кодом Arduino
 │    └──temp_humidity_light_2    # Код для Arduino
