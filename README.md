@@ -34,8 +34,7 @@
 ├── fitodomik.exe        # Приложение exe
 ├──fitodomik&logging.py  # Программа с системой логирования
 │
-├── temp_humidity_light_2/       # Папка с кодом Arduino
-│    └──temp_humidity_light_2    # Код для Arduino
+├── fitodomik.ino      # Код для Arduino
 │
 ├── foto/              # Директория с изображениями интерфейса
 │   ├── screen1v1.png  # Скриншот экрана часы и погода
