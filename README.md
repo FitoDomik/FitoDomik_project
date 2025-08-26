@@ -33,6 +33,7 @@
 ├── README.md            # Документация проекта
 ├── fitodomik.exe        # Приложение exe
 ├──fitodomik&logging.py  # Программа с системой логирования
+├──fitodomik.apk         # Фитодомик — APK-приложение для Android (удобная альтернатива сайту для управления) 
 │
 ├── fitodomik.ino      # Код для Arduino
 │
