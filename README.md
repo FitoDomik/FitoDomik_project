@@ -389,3 +389,15 @@ ls -la ~/.config/autostart/
 ---
 
 *📝 Примечание: Замените `/home/user/` на ваш путь к пользователю.* 
+
+# 🌱 Проект **ФитоДомик**
+
+⭐ **Основной репозиторий проекта ФитоДомик**  
+[👉 GitHub: FitoDomik_project](https://github.com/FitoDomik/FitoDomik_project)
+
+📌 **Сайт-визитка проекта**  
+[👉 GitHub: fitodomik.ru](https://github.com/FitoDomik/fitodomik.ru)
+
+💻 **Сайт для управления умной фермой**  
+[👉 GitHub: fitodomik.online](https://github.com/FitoDomik/fitodomik.online)
+
