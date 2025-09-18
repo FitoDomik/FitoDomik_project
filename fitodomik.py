@@ -24,6 +24,33 @@ import base64
 import sys
 import urllib3
 urllib3.disable_warnings()
+class ScrollableFrame(ttk.Frame):
+    def __init__(self, parent, *args, **kwargs):
+        super().__init__(parent, *args, **kwargs)
+        self.canvas = tk.Canvas(self, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = ttk.Frame(self.canvas)
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        self.canvas_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.bind_mousewheel()
+        self.canvas.bind('<Configure>', self._on_canvas_configure)
+    def bind_mousewheel(self):
+        def _on_mousewheel(event):
+            self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        def _bind_to_mousewheel(event):
+            self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        def _unbind_from_mousewheel(event):
+            self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.bind('<Enter>', _bind_to_mousewheel)
+        self.canvas.bind('<Leave>', _unbind_from_mousewheel)
+    def _on_canvas_configure(self, event):
+        canvas_width = event.width
+        self.canvas.itemconfig(self.canvas_window, width=canvas_width)
 def setup_ssl_and_network():
     cert_paths = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "cert_temp", "mozilla_certs.pem"),
@@ -461,7 +488,7 @@ class ArduinoHandler:
     def __init__(self):
         self.port = None
         self.serial_connection = None
-        self.polling_interval = 5 * 60
+        self.polling_interval = 5
         self.is_connected = False
         self.running = False
         self.monitoring_thread = None
@@ -479,9 +506,6 @@ class ArduinoHandler:
         self.curtains_state = 0
         self.pump_state = 0
         self.fan_state = 0
-        self.last_sensor_data_time = None
-        self.serial_lock = threading.RLock()
-        self.serial_transaction_active = threading.Event()
     def connect(self):
         if self.is_connected:
             return True
@@ -495,10 +519,7 @@ class ArduinoHandler:
             return False
     def disconnect(self):
         if self.serial_connection and self.is_connected:
-            try:
-                self.serial_connection.close()
-            except Exception:
-                pass
+            self.serial_connection.close()
             self.is_connected = False
     def start_monitoring(self):
         if not self.is_connected:
@@ -513,24 +534,13 @@ class ArduinoHandler:
     def stop_monitoring(self):
         self.running = False
         if self.monitoring_thread:
-            try:
-                self.monitoring_thread.join(timeout=2)
-            except Exception:
-                pass
+            self.monitoring_thread.join(timeout=2)
         self.disconnect()
     def _monitoring_loop(self):
         while self.running:
             try:
-                if self.serial_transaction_active.is_set():
-                    time_module.sleep(0.05)
-                    continue
-                if self.is_connected and self.serial_connection and self.serial_connection.in_waiting > 0:
-                    with self.serial_lock:
-                        try:
-                            line = self.serial_connection.readline().decode('utf-8', errors='replace').strip()
-                        except (OSError, TypeError, AttributeError):
-                            self.is_connected = False
-                            continue
+                if self.is_connected and self.serial_connection.in_waiting > 0:
+                    line = self.serial_connection.readline().decode('utf-8', errors='replace').strip()
                     if line:
                         if self.parse_sensor_response(line):
                             continue
@@ -563,7 +573,6 @@ class ArduinoHandler:
                 self.pump_state = self.relay2_state
                 self.curtains_state = self.relay3_state
                 self.led_state = self.relay4_state
-                self.last_sensor_data_time = datetime.now()
                 if self.update_callback:
                     self.update_callback()
                 return True
@@ -592,7 +601,6 @@ class ArduinoHandler:
                     elif relay_num == "R4":
                         self.relay4_state = 1 if relay_state else 0
                         self.led_state = self.relay4_state
-            self.last_sensor_data_time = datetime.now()
             if self.update_callback:
                 self.update_callback()
             return True
@@ -603,70 +611,55 @@ class ArduinoHandler:
             if not self.connect():
                 return False
         try:
-            self.serial_transaction_active.set()
-            time_module.sleep(0.05)
-            with self.serial_lock:
-                command = ""
-                if device_type == "LED" or device_type == "LAMP":
-                    command = "4"  
-                elif device_type == "CURTAINS":
-                    command = "3"  
-                elif device_type == "RELAY3" or device_type == "PUMP":
-                    command = "2"  
-                elif device_type == "RELAY4" or device_type == "FAN":
-                    command = "1"  
-                elif device_type == "ALL_ON":
-                    command = "A+"
-                elif device_type == "ALL_OFF":
-                    command = "A-"
-                elif device_type == "STATUS":
-                    command = "S"
-                if command:
-                    if not self.serial_connection or not self.serial_connection.is_open:
-                        return False
-                    self.serial_connection.reset_input_buffer()
-                    self.serial_connection.write((command + '\n').encode('utf-8'))
-                    time_module.sleep(0.5)
-                    if self.serial_connection.in_waiting > 0:
-                        response = self.serial_connection.readline().decode('utf-8', errors='replace').strip()
-                        if response:
-                            self.parse_relay_status(response)
-                    return True
-                return False
+            command = ""
+            if device_type == "LED" or device_type == "LAMP":
+                command = "4"  
+            elif device_type == "CURTAINS":
+                command = "3"  
+            elif device_type == "RELAY3" or device_type == "PUMP":
+                command = "2"  
+            elif device_type == "RELAY4" or device_type == "FAN":
+                command = "1"  
+            elif device_type == "ALL_ON":
+                command = "A+"
+            elif device_type == "ALL_OFF":
+                command = "A-"
+            elif device_type == "STATUS":
+                command = "S"
+            if command:
+                self.serial_connection.reset_input_buffer()
+                self.serial_connection.write((command + '\n').encode('utf-8'))
+                time_module.sleep(0.5)
+                if self.serial_connection.in_waiting > 0:
+                    response = self.serial_connection.readline().decode('utf-8', errors='replace').strip()
+                    if response:
+                        self.parse_relay_status(response)
+                return True
+            return False
         except Exception as e:
             self.is_connected = False
             return False
-        finally:
-            self.serial_transaction_active.clear()
     def send_schedule_data(self, data):
         if not self.is_connected:
             if not self.connect():
                 return False
         try:
-            self.serial_transaction_active.set()
-            time_module.sleep(0.05)
-            with self.serial_lock:
-                # Проверяем, что порт все еще открыт
-                if not self.serial_connection or not self.serial_connection.is_open:
-                    return False
-                self.serial_connection.reset_input_buffer()
-                self.serial_connection.write((data + '\n').encode('utf-8'))
-                time_module.sleep(2)
-                response_lines = []
-                timeout_start = time_module.time()
-                while time_module.time() - timeout_start < 5:  
-                    if self.serial_connection.in_waiting > 0:
-                        line = self.serial_connection.readline().decode('utf-8', errors='replace').strip()
-                        if line:
-                            response_lines.append(line)
-                            if "Data loaded successfully" in line:
-                                return True
-                    time_module.sleep(0.1)
-                return len(response_lines) > 0
+            self.serial_connection.reset_input_buffer()
+            self.serial_connection.write((data + '\n').encode('utf-8'))
+            time_module.sleep(2)
+            response_lines = []
+            timeout_start = time_module.time()
+            while time_module.time() - timeout_start < 5:  
+                if self.serial_connection.in_waiting > 0:
+                    line = self.serial_connection.readline().decode('utf-8', errors='replace').strip()
+                    if line:
+                        response_lines.append(line)
+                        if "Data loaded successfully" in line:
+                            return True
+                time_module.sleep(0.1)
+            return len(response_lines) > 0
         except Exception as e:
             return False
-        finally:
-            self.serial_transaction_active.clear()
     def request_sensor_data(self):
         return True
     def request_device_states(self):
@@ -682,9 +675,6 @@ class DataSender:
         self.sending_queue = []
         self.queue_lock = threading.Lock()
         self.sending_active = False
-        self.last_successful_send_time = None
-        self.last_attempt_send_time = None
-        self.max_queue_size = 500
         self.start_sender_thread()
     def start_sender_thread(self):
         if self.sending_thread is None or not self.sending_thread.is_alive():
@@ -694,10 +684,7 @@ class DataSender:
     def stop_sender_thread(self):
         self.sending_active = False
         if self.sending_thread and self.sending_thread.is_alive():
-            try:
-                self.sending_thread.join(timeout=1.0)
-            except Exception:
-                pass
+            self.sending_thread.join(timeout=1.0)
     def _sender_thread_loop(self):
         while self.sending_active:
             data_to_send = None
@@ -712,12 +699,7 @@ class DataSender:
         self.headers = {"X-Auth-Token": f"{self.token}"}
     def get_max_sensor_id(self):
         try:
-            response = requests.get(
-                self.max_id_url,
-                headers=self.headers,
-                timeout=10,
-                verify=os.environ.get('REQUESTS_CA_BUNDLE', True)
-            )
+            response = requests.get(self.max_id_url, headers=self.headers)
             if response.status_code == 200:
                 data = response.json()
                 if data.get('success') and 'max_id' in data:
@@ -747,9 +729,6 @@ class DataSender:
             except (ValueError, TypeError):
                 return False
             with self.queue_lock:
-                if len(self.sending_queue) >= self.max_queue_size:
-                    dropped = len(self.sending_queue) - self.max_queue_size + 1
-                    del self.sending_queue[:dropped]
                 self.sending_queue.append((temp, humidity, soil, light, co2, pressure, 
                                           led_state, curtains_state, pump_state, fan_state))
             return True
@@ -758,7 +737,6 @@ class DataSender:
     def _send_data_internal(self, temp, humidity, soil, light, co2, pressure, 
                            led_state, curtains_state, pump_state, fan_state):
         try:
-            self.last_attempt_send_time = datetime.now()
             max_id = self.get_max_sensor_id()
             next_id = max(max_id + 1, self.last_used_id + 1)
             try:
@@ -795,7 +773,6 @@ class DataSender:
                         resp_data = response.json()
                         if resp_data.get('success'):
                             self.last_used_id = next_id
-                            self.last_successful_send_time = datetime.now()
                             return True
                         else:
                             return False
@@ -803,9 +780,9 @@ class DataSender:
                         return False
                 else:
                     return False
-            except Exception as ex:
+            except:
                 return False
-        except Exception:
+        except:
             return False
 class ThresholdManager:
     def __init__(self, token=""):
@@ -967,7 +944,7 @@ class FitoDomikApp:
         self.sensor_history = SensorHistory()
         self.last_update_time = datetime.now()
         self.chart_update_interval = 30  
-        self.data_send_interval = 30 * 60
+        self.data_send_interval = 1800   
         self.last_send_time = datetime.now() - timedelta(seconds=self.data_send_interval)  
         self.next_photo_check_time = datetime.now()
         self.photo_check_interval = 60  
@@ -1008,7 +985,7 @@ class FitoDomikApp:
         self.current_theme = "light"
         self.token = ""
         self.port = "COM10"
-        self.polling_interval = 5 * 60
+        self.polling_interval = 5
         self.photo_time = 12
         self.photo_count = 1
         self.photo_time2 = 18  
@@ -1053,10 +1030,6 @@ class FitoDomikApp:
         self.check_photo_time()
         self.root.after(2000, self.auto_start_system)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.last_successful_send_time = None
-        self.last_health_check = datetime.now()
-        self.restart_cooldown_until = datetime.min
-        self.root.after(15_000, self.check_health)
     def update_control_mode(self):
         mode = self.control_mode.get()
         self.save_settings()
@@ -1073,10 +1046,7 @@ class FitoDomikApp:
         else:
             self.load_manual_data_to_arduino()
     def load_auto_data_to_arduino(self):
-        if getattr(self, '_load_auto_thread', None) and self._load_auto_thread.is_alive():
-            return
-        self._load_auto_thread = threading.Thread(target=self._load_auto_data_thread, daemon=True)
-        self._load_auto_thread.start()
+        threading.Thread(target=self._load_auto_data_thread, daemon=True).start()
     def _load_auto_data_thread(self):
         try:
             if not self.token:
@@ -1103,9 +1073,9 @@ class FitoDomikApp:
         try:
             base_url = 'https://fitodomik.online/api'
             headers = {'X-Auth-Token': token} if token else {}
-            t = requests.get(f"{base_url}/get-thresholds.php", headers=headers, timeout=10, verify=os.environ.get('REQUESTS_CA_BUNDLE', True)).json()
-            d = requests.get(f"{base_url}/get-sensor-data.php", headers=headers, timeout=10, verify=os.environ.get('REQUESTS_CA_BUNDLE', True)).json()
-            s = requests.get(f"{base_url}/get-schedule.php", headers=headers, timeout=10, verify=os.environ.get('REQUESTS_CA_BUNDLE', True)).json()
+            t = requests.get(f"{base_url}/get-thresholds.php", headers=headers, timeout=10).json()
+            d = requests.get(f"{base_url}/get-sensor-data.php", headers=headers, timeout=10).json()
+            s = requests.get(f"{base_url}/get-schedule.php", headers=headers, timeout=10).json()
             order = ['temperature', 'humidity_air', 'humidity_soil', 'co2']
             thresholds = ";".join(f"{t[k]['min_limit']}-{t[k]['max_limit']}" 
                                  for k in order if k in t) or "0-0;0-0;0-0;0-0"
@@ -1131,7 +1101,7 @@ class FitoDomikApp:
                 return ",".join(result)
             schedule = f"{group(lamp_hours)};{group(curtain_hours)}"
             return f"{thresholds}|{devices}|{schedule}"
-        except Exception:
+        except:
             return "0-0;0-0;0-0;0-0|0,0|0;0"
     def load_manual_data_to_arduino(self):
         try:
@@ -1217,22 +1187,10 @@ class FitoDomikApp:
                     self.current_theme = settings.get('theme', 'light')
                     self.token = settings.get('token', '')
                     self.port = settings.get('port', 'COM10')
-                    polling_setting = settings.get('polling_interval', 5)
-                    if polling_setting < 100:
-                        self.polling_interval = polling_setting * 60
-                    else:
-                        self.polling_interval = polling_setting
-                    
+                    self.polling_interval = settings.get('polling_interval', 5)
                     if 'data_send_interval' in settings:
-                        send_setting = settings.get('data_send_interval')
-                        if send_setting < 1000:
-                            self.data_send_interval = send_setting * 60
-                        else:
-                            self.data_send_interval = send_setting
-                    else:
-                        self.data_send_interval = 30 * 60
-                    
-                    if self.data_send_interval < 300:
+                        self.data_send_interval = settings.get('data_send_interval')
+                    if self.data_send_interval < 300:  
                         self.data_send_interval = 300
                     self.photo_time = settings.get('photo_time', 12)
                     self.plant_analyzer.camera_index = settings.get('camera_index', 0)
@@ -1543,78 +1501,39 @@ class FitoDomikApp:
         finally:
             if hasattr(self, '_update_pending'):
                 del self._update_pending
-    def check_health(self):
-        try:
-            now = datetime.now()
-            if getattr(self.data_sender, 'last_successful_send_time', None):
-                self.last_successful_send_time = self.data_sender.last_successful_send_time
-            send_stalled = False
-            if self.last_successful_send_time is not None:
-                try:
-                    threshold_seconds = max(600, int(self.data_send_interval * 2.0))
-                except Exception:
-                    threshold_seconds = 600
-                if (now - self.last_successful_send_time).total_seconds() > threshold_seconds:
-                    send_stalled = True
-            arduino_stalled = False
-            last_sensor_time = getattr(self.arduino, 'last_sensor_data_time', None)
-            if last_sensor_time is not None:
-                arduino_threshold = max(600, self.polling_interval * 2)
-                if (now - last_sensor_time).total_seconds() > arduino_threshold:
-                    arduino_stalled = True
-            if (send_stalled or arduino_stalled) and now >= self.restart_cooldown_until:
-                self.safe_restart_monitoring()
-                self.restart_cooldown_until = now + timedelta(minutes=3)
-        except Exception:
-            pass
-        finally:
-            self.root.after(15_000, self.check_health)
-    def safe_restart_monitoring(self):
-        try:
-            if self.arduino.running:
-                self.arduino.stop_monitoring()
-            time_module.sleep(0.5)
-            self.arduino.port = self.port
-            self.arduino.polling_interval = self.polling_interval
-            started = self.arduino.start_monitoring()
-            if started:
-                self.root.after(500, self.load_data_to_arduino)
-                self.root.after(1000, self.arduino.request_device_states)
-        except Exception:
-            pass
     def init_weather_tab(self):
         frame = ttk.Frame(self.tab_weather)
-        frame.pack(fill='both', expand=True, padx=20, pady=20)
+        frame.pack(fill='both', expand=True, padx=16, pady=12)
         self.weather_api_key = '7124ee85d3cb4314a6032714251303'
         self.last_weather_update = None
         time_frame = ttk.Frame(frame)
-        time_frame.pack(pady=10, fill='x')
+        time_frame.pack(pady=4, fill='x')
         self.time_label = tk.Label(time_frame, text="00:00:00", font=("Arial", 48))
-        self.time_label.pack(pady=10)
+        self.time_label.pack(pady=4)
         self.date_label = tk.Label(time_frame, text="01.01.2023", font=("Arial", 24))
-        self.date_label.pack(pady=5)
+        self.date_label.pack(pady=2)
         separator = tk.Label(frame, text="─" * 50)
-        separator.pack(pady=10)
+        separator.pack(pady=6)
         weather_frame = ttk.Frame(frame)
-        weather_frame.pack(pady=10, fill='both', expand=True)
+        weather_frame.pack(pady=6, fill='both', expand=True)
         weather_header = tk.Label(weather_frame, text="Погода в Москве", font=("Arial", 24, "bold"))
-        weather_header.pack(pady=10)
+        weather_header.pack(pady=6)
         self.weather_icon_label = tk.Label(weather_frame, text="")
-        self.weather_icon_label.pack(pady=5)
+        self.weather_icon_label.pack(pady=2)
         self.temp_label = tk.Label(weather_frame, text="--°C", font=("Arial", 36, "bold"))
-        self.temp_label.pack(pady=5)
+        self.temp_label.pack(pady=2)
         self.desc_label = tk.Label(weather_frame, text="Загрузка...", font=("Arial", 14))
-        self.desc_label.pack(pady=5)
+        self.desc_label.pack(pady=2)
         details_frame = ttk.Frame(weather_frame)
-        details_frame.pack(pady=10, fill='x')
+        details_frame.pack(pady=6, fill='x')
         humidity_frame = ttk.Frame(details_frame)
-        humidity_frame.pack(side='left', expand=True, fill='both', padx=20)
+        humidity_frame.pack(side='left', expand=True, fill='both', padx=10)
         humidity_label = tk.Label(humidity_frame, text="Влажность", font=("Arial", 12))
         humidity_label.pack()
         self.weather_humidity_value = tk.Label(humidity_frame, text="--%", font=("Arial", 14, "bold"))
         self.weather_humidity_value.pack()
         wind_frame = ttk.Frame(details_frame)
-        wind_frame.pack(side='right', expand=True, fill='both', padx=20)
+        wind_frame.pack(side='right', expand=True, fill='both', padx=10)
         wind_label = tk.Label(wind_frame, text="Ветер", font=("Arial", 12))
         wind_label.pack()
         self.wind_value = tk.Label(wind_frame, text="-- м/с", font=("Arial", 14, "bold"))
@@ -2053,6 +1972,7 @@ class FitoDomikApp:
                 self.load_auto_data_to_arduino()
         except Exception as e:
             error_msg = f"Ошибка при получении данных: {str(e)}"
+            print(error_msg)
             self.root.after(0, lambda: self.threshold_status_var.set(error_msg))
     def _update_schedule_ui(self, schedule_data):
         if not schedule_data:
@@ -2077,8 +1997,9 @@ class FitoDomikApp:
         self.threshold_status_var.set(f"Данные успешно обновлены в {current_time}")
         self.apply_theme()
     def init_settings_tab(self):
-        main_frame = ttk.Frame(self.tab_settings)
-        main_frame.pack(fill='both', expand=True, padx=10, pady=10)  
+        scrollable_frame = ScrollableFrame(self.tab_settings)
+        scrollable_frame.pack(fill='both', expand=True, padx=10, pady=10)
+        main_frame = scrollable_frame.scrollable_frame
         header = tk.Label(main_frame, text="Настройки приложения", font=("Arial", 14, "bold"))
         header.pack(pady=5)  
         theme_frame = ttk.LabelFrame(main_frame, text="Тема интерфейса")
@@ -2151,23 +2072,23 @@ class FitoDomikApp:
         polling_label.pack(side='left', padx=5)  
         self.interval_spinbox = ttk.Spinbox(polling_frame, from_=1, to=60, width=3)  
         self.interval_spinbox.pack(side='left', padx=5)  
-        self.interval_spinbox.set(self.polling_interval // 60)
+        self.interval_spinbox.set(self.polling_interval)
         self.interval_spinbox.bind("<FocusOut>", lambda e: self.auto_save_settings())
         self.interval_spinbox.bind("<<Increment>>", lambda e: self.auto_save_settings())
         self.interval_spinbox.bind("<<Decrement>>", lambda e: self.auto_save_settings())
-        interval_units = tk.Label(polling_frame, text="минут", font=("Arial", 12))
+        interval_units = tk.Label(polling_frame, text="секунд", font=("Arial", 12))
         interval_units.pack(side='left')
         send_interval_frame = ttk.Frame(intervals_frame)
         send_interval_frame.pack(fill='x', padx=10, pady=5)
         send_interval_label = tk.Label(send_interval_frame, text="Отправка данных:", font=("Arial", 12))
         send_interval_label.pack(side='left', padx=5)
-        self.send_interval_spinbox = ttk.Spinbox(send_interval_frame, from_=5, to=120, width=4)  
+        self.send_interval_spinbox = ttk.Spinbox(send_interval_frame, from_=300, to=7200, width=4)  
         self.send_interval_spinbox.pack(side='left', padx=5)
-        self.send_interval_spinbox.set(self.data_send_interval // 60)
+        self.send_interval_spinbox.set(self.data_send_interval)
         self.send_interval_spinbox.bind("<FocusOut>", lambda e: self.auto_save_settings())
         self.send_interval_spinbox.bind("<<Increment>>", lambda e: self.auto_save_settings())
         self.send_interval_spinbox.bind("<<Decrement>>", lambda e: self.auto_save_settings())
-        send_interval_units = tk.Label(send_interval_frame, text="минут", font=("Arial", 12))
+        send_interval_units = tk.Label(send_interval_frame, text="секунд", font=("Arial", 12))
         send_interval_units.pack(side='left')
         photo_count_frame = ttk.Frame(intervals_frame)
         photo_count_frame.pack(fill='x', padx=10, pady=5)  
@@ -2241,7 +2162,7 @@ class FitoDomikApp:
             if current_fullscreen:
                 self.root.attributes('-fullscreen', False)
                 self.root.overrideredirect(False)
-                self.root.geometry("1200x800")
+                self.root.geometry("1024x600")
                 self.root.title("ФитоДомик")
             else:
                 self.root.attributes('-fullscreen', True)
@@ -2270,17 +2191,15 @@ class FitoDomikApp:
         self.token = self.token_entry.get()
         self.port = self.port_combobox.get()
         try:
-            polling_minutes = int(self.interval_spinbox.get())
-            self.polling_interval = polling_minutes * 60
+            self.polling_interval = int(self.interval_spinbox.get())
         except ValueError:
-            self.polling_interval = 5 * 60
+            self.polling_interval = 5  
         try:
-            send_minutes = int(self.send_interval_spinbox.get())
-            self.data_send_interval = send_minutes * 60
-            if self.data_send_interval < 300:
+            self.data_send_interval = int(self.send_interval_spinbox.get())
+            if self.data_send_interval < 300:  
                 self.data_send_interval = 300
         except ValueError:
-            self.data_send_interval = 30 * 60
+            self.data_send_interval = 300
         try:
             self.photo_time = int(self.photo_time_spinbox.get())
             if self.photo_time < 1 or self.photo_time > 24:
@@ -2738,6 +2657,7 @@ class FitoDomikApp:
                 self.load_auto_data_to_arduino()
         except Exception as e:
             error_msg = f"Ошибка при получении данных: {str(e)}"
+            print(error_msg)
             self.root.after(0, lambda: self.threshold_status_var.set(error_msg))
     def create_manual_threshold_inputs(self):
         header_frame = ttk.Frame(self.thresholds_container)
