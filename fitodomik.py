@@ -24,79 +24,6 @@ import base64
 import sys
 import urllib3
 urllib3.disable_warnings()
-class ScrollableFrame(ttk.Frame):
-    def __init__(self, parent, *args, **kwargs):
-        super().__init__(parent, *args, **kwargs)
-        self.canvas = tk.Canvas(self, highlightthickness=0)
-        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.scrollable_frame = ttk.Frame(self.canvas)
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
-        self.canvas_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.bind_mousewheel()
-        self.canvas.bind('<Configure>', self._on_canvas_configure)
-    def bind_mousewheel(self):
-        def _on_mousewheel(event):
-            self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        def _bind_to_mousewheel(event):
-            self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        def _unbind_from_mousewheel(event):
-            self.canvas.unbind_all("<MouseWheel>")
-        self.canvas.bind('<Enter>', _bind_to_mousewheel)
-        self.canvas.bind('<Leave>', _unbind_from_mousewheel)
-    def _on_canvas_configure(self, event):
-        canvas_width = event.width
-        self.canvas.itemconfig(self.canvas_window, width=canvas_width)
-def setup_ssl_and_network():
-    cert_paths = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cert_temp", "mozilla_certs.pem"),
-        os.path.expanduser("~/Downloads/cert_temp/mozilla_certs.pem"),
-        os.path.expanduser("~/cert_temp/mozilla_certs.pem"),
-        "/etc/ssl/certs/ca-certificates.crt"
-    ]
-    cert_found = False
-    for path in cert_paths:
-        if os.path.exists(path):
-            os.environ['REQUESTS_CA_BUNDLE'] = path
-            os.environ['SSL_CERT_FILE'] = path
-            cert_found = True
-            break
-    if not cert_found:
-        try:
-            cert_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cert_temp")
-            os.makedirs(cert_dir, exist_ok=True)
-            cert_path = os.path.join(cert_dir, "mozilla_certs.pem")
-            try:
-                session = requests.Session()
-                session.verify = False
-                response = session.get("https://curl.se/ca/cacert.pem", timeout=120)
-                if response.status_code == 200:
-                    with open(cert_path, 'wb') as f:
-                        f.write(response.content)
-                    os.environ['REQUESTS_CA_BUNDLE'] = cert_path
-                    os.environ['SSL_CERT_FILE'] = cert_path
-                    cert_found = True
-            except:
-                pass
-        except:
-            pass
-    try:
-        old_request = requests.Session.request
-        def new_request(self, method, url, **kwargs):
-            if 'timeout' not in kwargs:
-                kwargs['timeout'] = 60  
-            if 'verify' not in kwargs and 'REQUESTS_CA_BUNDLE' in os.environ:
-                kwargs['verify'] = os.environ['REQUESTS_CA_BUNDLE']
-            return old_request(self, method, url, **kwargs)
-        requests.Session.request = new_request
-    except:
-        pass
-    return cert_found
-setup_ssl_and_network()
 matplotlib.use("TkAgg")  
 DISEASES_DB = {
     "yellow_leaves": {
@@ -1503,37 +1430,37 @@ class FitoDomikApp:
                 del self._update_pending
     def init_weather_tab(self):
         frame = ttk.Frame(self.tab_weather)
-        frame.pack(fill='both', expand=True, padx=16, pady=12)
+        frame.pack(fill='both', expand=True, padx=20, pady=20)
         self.weather_api_key = '7124ee85d3cb4314a6032714251303'
         self.last_weather_update = None
         time_frame = ttk.Frame(frame)
-        time_frame.pack(pady=4, fill='x')
+        time_frame.pack(pady=10, fill='x')
         self.time_label = tk.Label(time_frame, text="00:00:00", font=("Arial", 48))
-        self.time_label.pack(pady=4)
+        self.time_label.pack(pady=10)
         self.date_label = tk.Label(time_frame, text="01.01.2023", font=("Arial", 24))
-        self.date_label.pack(pady=2)
+        self.date_label.pack(pady=5)
         separator = tk.Label(frame, text="─" * 50)
-        separator.pack(pady=6)
+        separator.pack(pady=10)
         weather_frame = ttk.Frame(frame)
-        weather_frame.pack(pady=6, fill='both', expand=True)
+        weather_frame.pack(pady=10, fill='both', expand=True)
         weather_header = tk.Label(weather_frame, text="Погода в Москве", font=("Arial", 24, "bold"))
-        weather_header.pack(pady=6)
+        weather_header.pack(pady=10)
         self.weather_icon_label = tk.Label(weather_frame, text="")
-        self.weather_icon_label.pack(pady=2)
+        self.weather_icon_label.pack(pady=5)
         self.temp_label = tk.Label(weather_frame, text="--°C", font=("Arial", 36, "bold"))
-        self.temp_label.pack(pady=2)
+        self.temp_label.pack(pady=5)
         self.desc_label = tk.Label(weather_frame, text="Загрузка...", font=("Arial", 14))
-        self.desc_label.pack(pady=2)
+        self.desc_label.pack(pady=5)
         details_frame = ttk.Frame(weather_frame)
-        details_frame.pack(pady=6, fill='x')
+        details_frame.pack(pady=10, fill='x')
         humidity_frame = ttk.Frame(details_frame)
-        humidity_frame.pack(side='left', expand=True, fill='both', padx=10)
+        humidity_frame.pack(side='left', expand=True, fill='both', padx=20)
         humidity_label = tk.Label(humidity_frame, text="Влажность", font=("Arial", 12))
         humidity_label.pack()
         self.weather_humidity_value = tk.Label(humidity_frame, text="--%", font=("Arial", 14, "bold"))
         self.weather_humidity_value.pack()
         wind_frame = ttk.Frame(details_frame)
-        wind_frame.pack(side='right', expand=True, fill='both', padx=10)
+        wind_frame.pack(side='right', expand=True, fill='both', padx=20)
         wind_label = tk.Label(wind_frame, text="Ветер", font=("Arial", 12))
         wind_label.pack()
         self.wind_value = tk.Label(wind_frame, text="-- м/с", font=("Arial", 14, "bold"))
@@ -1997,9 +1924,8 @@ class FitoDomikApp:
         self.threshold_status_var.set(f"Данные успешно обновлены в {current_time}")
         self.apply_theme()
     def init_settings_tab(self):
-        scrollable_frame = ScrollableFrame(self.tab_settings)
-        scrollable_frame.pack(fill='both', expand=True, padx=10, pady=10)
-        main_frame = scrollable_frame.scrollable_frame
+        main_frame = ttk.Frame(self.tab_settings)
+        main_frame.pack(fill='both', expand=True, padx=10, pady=10)  
         header = tk.Label(main_frame, text="Настройки приложения", font=("Arial", 14, "bold"))
         header.pack(pady=5)  
         theme_frame = ttk.LabelFrame(main_frame, text="Тема интерфейса")
@@ -2162,13 +2088,14 @@ class FitoDomikApp:
             if current_fullscreen:
                 self.root.attributes('-fullscreen', False)
                 self.root.overrideredirect(False)
-                self.root.geometry("1024x600")
+                self.root.geometry("1200x800")
                 self.root.title("ФитоДомик")
             else:
                 self.root.attributes('-fullscreen', True)
                 self.root.overrideredirect(True)
         except Exception as e:
             print(f"Ошибка переключения полноэкранного режима: {e}")
+    
     def close_app(self):
         self.on_close()
     def toggle_second_photo_time(self, *args):
